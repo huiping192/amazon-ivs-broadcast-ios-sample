@@ -262,7 +262,20 @@ extension CustomSourcesViewController: IVSBroadcastSession.Delegate {
             }
         }
     }
-    func broadcastSession(_ session: IVSBroadcastSession, didEmitError error: Error) {}
+  func broadcastSession(_ session: IVSBroadcastSession, didEmitError error: Error) {
+    guard let endpointPath = endpointField.text, let url = URL(string: endpointPath), let key = streamKeyField.text else {
+        let alert = UIAlertController(title: "Invalid Endpoint",
+                                      message: "The endpoint or streamkey you provided is invalid",
+                                      preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
+        return
+    }
+    
+    try? broadcastSession?.start(with: url, streamKey: key)
+    
+  }
+  
     func broadcastSession(_ session: IVSBroadcastSession, audioStatsUpdatedWithPeak peak: Double, rms: Double) {
         labelSoundDb.text = "db: \(rms)"
     }
