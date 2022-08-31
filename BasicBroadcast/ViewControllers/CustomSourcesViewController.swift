@@ -5,6 +5,7 @@
 import UIKit
 import AmazonIVSBroadcast
 import AVFoundation
+import Network
 
 class CustomSourcesViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate {
 
@@ -18,6 +19,10 @@ class CustomSourcesViewController: UIViewController, AVCaptureVideoDataOutputSam
     
     @IBOutlet private var applyFilterButton: UIButton!
     
+  private var state: IVSBroadcastSession.State?
+  private var error: Error?
+  private var retryTimeCalculater = BroadcastRetryTimeCalculater()
+
     // State management
     private var isRunning = false {
         didSet {
@@ -42,6 +47,9 @@ class CustomSourcesViewController: UIViewController, AVCaptureVideoDataOutputSam
 
     private let queue = DispatchQueue(label: "media-queue")
 
+    private let monitor = NWPathMonitor()
+  private let url: String? = "streaming url"
+  private let key: String? = "key"
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         // The SDK will not handle disabling the idle timer for you because that might
@@ -68,8 +76,18 @@ class CustomSourcesViewController: UIViewController, AVCaptureVideoDataOutputSam
         
         // Auto complete the last used endpoint/key pair.
         let lastAuth = UserDefaultsAuthDao.shared.lastUsedAuth()
-        endpointField.text = lastAuth?.endpoint
-        streamKeyField.text = lastAuth?.streamKey
+        endpointField.text = url
+        streamKeyField.text = key
+      
+      
+      monitor.start(queue: .global(qos: .background))
+
+      monitor.pathUpdateHandler = { [weak self]path in
+        // ネットワーク復帰時に再度配信retryさせる
+        guard path.status == .satisfied else { return }
+        self?.restartSessionIfNeeded()
+      }
+
     }
     
     override func viewWillDisappear(_ animated: Bool) {
@@ -245,25 +263,68 @@ class CustomSourcesViewController: UIViewController, AVCaptureVideoDataOutputSam
 
 
 extension CustomSourcesViewController: IVSBroadcastSession.Delegate {
-    func broadcastSession(_ session: IVSBroadcastSession, didChange state: IVSBroadcastSession.State) {
-        print("IVSBroadcastSession state did change to \(state.rawValue)")
-        DispatchQueue.main.async {
-            switch state {
-            case .invalid: self.connectionView.backgroundColor = .darkGray
-            case .connecting: self.connectionView.backgroundColor = .yellow
-            case .connected: self.connectionView.backgroundColor = .green
-            case .disconnected:
-                self.connectionView.backgroundColor = .darkGray
-                self.isRunning = false
-            case .error:
-                self.connectionView.backgroundColor = .red
-                self.isRunning = false
-            @unknown default: self.connectionView.backgroundColor = .darkGray
-            }
-        }
+  private var isConnected: Bool {
+    return state == .connected
+  }
+
+  private func restartSessionIfNeeded() {
+    guard !isConnected else { return }
+    
+    guard let endpointPath = url, let url = URL(string: endpointPath), let key = key else {
+      return
     }
-    func broadcastSession(_ session: IVSBroadcastSession, didEmitError error: Error) {}
+    
+    try? broadcastSession?.start(with: url, streamKey: key)
+  }
+  
+  func broadcastSession(_ session: IVSBroadcastSession, didChange state: IVSBroadcastSession.State) {
+    print("[ivs] broadcastSession", #function, state.rawValue)
+    self.state = state
+
+    // errorから復帰時
+    if isConnected && error != nil {
+      print("[ivs] broadcastSession", #function, "retry success")
+      error = nil
+      retryTimeCalculater.reset()
+//      NotificationCenter.default.post(name: .broadcastConfigurationDidErrorResolveNotification, object: self)
+    }
+
+    // disconnected後にretry。error状態でretryするとbroadcastSessionがActive Stateになってる可能性があって、startされない可能性があります
+    if state == .disconnected {
+      DispatchQueue.main.asyncAfter(deadline: .now() + retryTimeCalculater.calculateDelayTime()) { [weak self] in
+        self?.restartSessionIfNeeded()
+      }
+    }
+  }
+
+  func broadcastSession(_ session: IVSBroadcastSession, didEmitError error: Error) {
+    print("[ivs] broadcastSession", #function, error)
+    self.error = error
+//    NotificationCenter.default.post(name: .broadcastConfigurationDidReceiveErrorNotification, object: self)
+  }
+  
     func broadcastSession(_ session: IVSBroadcastSession, audioStatsUpdatedWithPeak peak: Double, rms: Double) {
         labelSoundDb.text = "db: \(rms)"
     }
+}
+
+private class BroadcastRetryTimeCalculater {
+  private var delayTime: TimeInterval = 0.0
+
+  private var delayInterval: TimeInterval = 1.0
+
+  private var maxDelayTime: TimeInterval = 10.0
+
+  func calculateDelayTime() -> TimeInterval {
+    let time = delayTime
+
+    let intervalAddedTime = delayTime + delayInterval
+    delayTime = intervalAddedTime >= maxDelayTime ? maxDelayTime : intervalAddedTime
+    return time
+  }
+
+  func reset() {
+    delayTime = 0.0
+  }
+
 }
